@@ -9,9 +9,11 @@ testing rather than eyeballing assembly.
 
 - **`starwake/`** — vertical shmup. Free-moving ship, player + enemy
   bullets (tiny dedicated 2x4px hit box, not the full sprite box - see
-  bug #12), one enemy type, parallax starfield, 3 lives with respawn and
+  bug #12), one enemy with 3 randomised movement patterns (straight/
+  sine-weave/zigzag-bounce - see bug #14) spawning in randomised waves of
+  1-3 with jittered timing, parallax starfield, 3 lives with respawn and
   invulnerability, score. Double-buffered, masked sprites, real-time
-  50Hz loop. Source + `run_tests.py` (35 checks) are checked in.
+  50Hz loop. Source + `run_tests.py` (43 checks) are checked in.
 - **`dungeon/`** — Pixel Dungeon-style top-down roguelike. Procedural
   rooms-and-corridors dungeon, fog of war, turn-based movement with
   smooth pixel-slide animation, camera dead-zone scrolling. **Parked** -
@@ -129,6 +131,26 @@ did in the routine's own body.
     new bullet by directly copying the shooter's X (correct only because
     the old bullet shared the shooter's box) needed the same explicit
     centring offset (`BUL_XOFF`) once the boxes diverged.
+14. **Sign-testing an absolute unsigned coordinate to detect underflow is
+    wrong**, even though it looks identical in code to the (correct)
+    pattern of sign-testing a small delta - found while adding sine/
+    zigzag enemy movement, which needed to clamp X into screen bounds
+    after applying a signed per-frame delta. The clamp code used `JP P`
+    on the *result* (old X + delta) to detect "went negative", but X
+    itself is an ordinary unsigned 0-240 value that legitimately has bit
+    7 set once it exceeds 127 - that's not a sign, just X being in the
+    right half of the screen. A sine-moving enemy's X visibly collapsed
+    to 0 the instant it first crossed 127, even though it was nowhere
+    near either screen edge. Fixed by only ever sign-testing the small
+    delta itself (genuinely bounded, safe to interpret as signed), then
+    clamping the unsigned X via plain `CP` against known bounds - never
+    sign-testing an absolute coordinate or a sum that could exceed 127
+    for entirely legitimate reasons. Note this is a *different* trap from
+    #13's collision-distance sign test, which stays safe specifically
+    because both coordinates being subtracted are bounded to [0,240] and
+    the true difference can never reach the range where the two's-
+    complement fold would misfire - the general rule is "know why a given
+    sign test is safe," not "sign tests are dangerous."
 
 Full narrative/reasoning for each of these lives in the git history of
 [`archeryspinner-code/sam-coupe-game-creator-skill`](https://github.com/archeryspinner-code/sam-coupe-game-creator-skill)
@@ -137,13 +159,14 @@ history for the game-specific fixes.
 
 ## Status / where each project left off
 
-**STARWAKE**: playable core loop - move, shoot, enemies spawn and shoot
-back, 3 lives, respawn, score, starfield, optimised bullets (see #12).
-Collision detection works but is flagged for further improvement (exact
-shape/feel still TBD). Not yet built: second enemy behaviour (sine-wave
-movement), wave-scripting (currently a flat random spawner - next up),
-HUD font for a real score/lives display and game-over screen,
-soundtrack/SFX, boss.
+**STARWAKE**: playable core loop - move, shoot, enemies spawn in
+randomised waves (1-3 enemies, jittered timing) and shoot back, each
+enemy randomly assigned one of 3 movement patterns (straight/sine-weave/
+zigzag-bounce) at spawn, 3 lives, respawn, score, starfield, optimised
+bullets (see #12). Collision detection works but is flagged for further
+improvement (exact shape/feel still TBD - next up). Not yet built: HUD
+font for a real score/lives display and game-over screen, soundtrack/SFX,
+boss.
 
 **Dungeon crawler**: parked (too slow). Playable core loop existed -
 procedural dungeon, fog of war, turn-based movement with smooth slide
@@ -168,3 +191,8 @@ built: monsters, combat, items, real HUD.
   to be accounted for explicitly wherever positions are compared or
   derived from each other - collision checks (#13) and spawn positioning
   both broke the same way for the same underlying reason.
+- Sign-testing a byte to detect "went negative" is only safe when the
+  value being tested is a genuinely small, bounded delta - never do it to
+  an absolute screen coordinate or a sum that legitimately spans the
+  whole 0-255 range (see bug #14). If it's not obvious *why* a given sign
+  test is safe, it probably isn't.

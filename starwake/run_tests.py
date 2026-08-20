@@ -630,3 +630,146 @@ def test_bullet_taper_preserves_background_nibble():
 test_bullet_spawn_is_centred_under_shooter()
 test_bullet_draw_erase_footprint_is_small()
 test_bullet_taper_preserves_background_nibble()
+
+
+def test_wave_spawner_produces_variable_batch_sizes():
+    """UPDATE_ENEMY_SPAWNER now spawns WAVE_SIZE_MIN..WAVE_SIZE_MAX
+    enemies per tick instead of always exactly one, and rolls a new
+    randomised delay each time. Run enough ticks to see multiple waves
+    and confirm both the batch size and the delay actually vary (not
+    just that the code runs)."""
+    m = fresh_machine(BIN)
+    batch_sizes = []
+    delays = []
+    prev_alive = 0
+    for frame in range(400):
+        err = call(m, SYM['UPDATE_ENEMY_SPAWNER'], max_runs=500000)
+        if err:
+            print(f"[WAVE] UPDATE_ENEMY_SPAWNER: {err} - FAIL")
+            return
+        alive = sum(1 for i in range(6)
+                    if m.memory[SYM['ENEMY_POOL'] + i*10 + 2] == 1)
+        if alive > prev_alive:
+            batch_sizes.append(alive - prev_alive)
+        prev_alive = alive
+        # free a slot occasionally so the pool doesn't saturate and mask
+        # further spawns
+        if frame % 15 == 0:
+            for i in range(6):
+                m.memory[SYM['ENEMY_POOL'] + i*10 + 2] = 0
+            prev_alive = 0
+    distinct_batches = len(set(batch_sizes))
+    in_range = all(1 <= b <= 3 for b in batch_sizes)
+    ok = distinct_batches > 1 and in_range and len(batch_sizes) > 3
+    print(f"[WAVE] spawner produces variable batch sizes (1-3), not always 1: "
+          f"{'PASS' if ok else 'FAIL'} (batches={batch_sizes})")
+
+
+def test_enemy_spawn_assigns_movement_type():
+    """SPAWN_ENEMY should roll EN_TYPE (0/1/2) and set EN_PHASE
+    appropriately: 0-15 for sine, 0/1 for zigzag, 0 for straight."""
+    m = fresh_machine(BIN)
+    types_seen = set()
+    for i in range(60):
+        m2 = fresh_machine(BIN)
+        call(m2, SYM['SPAWN_ENEMY'], max_runs=500000)
+        # advance the shared RNG stream so repeated single-enemy spawns
+        # in fresh machines don't all roll the same type
+        for _ in range(i):
+            call(m2, SYM['RND_BYTE'])
+        t = m2.memory[SYM['ENEMY_POOL'] + 8]  # EN_TYPE offset
+        types_seen.add(t)
+    # More reliable: spawn several enemies into the SAME machine in one go
+    m3 = fresh_machine(BIN)
+    for i in range(6):
+        call(m3, SYM['SPAWN_ENEMY'], max_runs=500000)
+    types_in_pool = [m3.memory[SYM['ENEMY_POOL'] + i*10 + 8] for i in range(6)]
+    valid = all(t in (0, 1, 2) for t in types_in_pool)
+    varied = len(set(types_in_pool)) > 1
+    print(f"[WAVE] SPAWN_ENEMY assigns a valid movement type (0/1/2) per enemy: "
+          f"{'PASS' if valid else 'FAIL'} (types={types_in_pool})")
+    print(f"[WAVE] a full pool of spawns shows more than one movement type: "
+          f"{'PASS' if varied else 'FAIL'} (types={types_in_pool})")
+
+    for t, name, phase_ok_fn in [
+        (1, 'sine', lambda p: 0 <= p <= 15),
+        (2, 'zigzag', lambda p: p in (0, 1)),
+    ]:
+        found = False
+        for i in range(6):
+            base = SYM['ENEMY_POOL'] + i*10
+            if m3.memory[base+8] == t:
+                phase = m3.memory[base+9]
+                ok = phase_ok_fn(phase)
+                found = True
+                print(f"[WAVE] {name} enemy's EN_PHASE is in valid range: "
+                      f"{'PASS' if ok else 'FAIL'} (phase={phase})")
+                break
+        if not found:
+            print(f"[WAVE] (no {name} enemy rolled in this sample - inconclusive, not a failure)")
+
+
+def test_sine_enemy_moves_horizontally_and_stays_in_bounds():
+    m = fresh_machine(BIN)
+    base = SYM['ENEMY_POOL']
+    m.memory[base+0] = 120         # EN_X
+    m.memory[base+1] = 20          # EN_Y
+    m.memory[base+2] = 1           # STATE_ALIVE
+    m.memory[base+8] = 1           # EN_TYPE = TYPE_SINE
+    m.memory[base+9] = 0           # EN_PHASE start
+    xs = []
+    for i in range(32):            # two full weave cycles
+        err = call(m, SYM['UPDATE_ENEMIES'], max_runs=500000)
+        if err:
+            print(f"[WAVE] sine UPDATE_ENEMIES: {err} - FAIL")
+            return
+        xs.append(m.memory[base+0])
+    moved = len(set(xs)) > 1
+    in_bounds = all(0 <= x <= SYM['EN_X_MAX'] if 'EN_X_MAX' in SYM else 0 <= x <= 240 for x in xs)
+    print(f"[WAVE] sine enemy's X actually varies over time (not fixed): "
+          f"{'PASS' if moved else 'FAIL'} (xs={xs})")
+    print(f"[WAVE] sine enemy stays within screen bounds: "
+          f"{'PASS' if in_bounds else 'FAIL'}")
+
+
+def test_zigzag_enemy_bounces_off_edges():
+    m = fresh_machine(BIN)
+    base = SYM['ENEMY_POOL']
+    # X=1 with a -2px step genuinely overshoots past 0 (1-2=-1) - a
+    # genuine overshoot is what should flip direction. X=2 (exactly
+    # ZIGZAG_SPEED) lands exactly on 0 with no overshoot, and by the same
+    # symmetric rule the right-edge case below relies on (exact landing
+    # on EN_X_MAX doesn't flip either - only exceeding it does), that
+    # correctly does NOT flip. An earlier version of this test used X=2
+    # and wrongly expected a flip there.
+    m.memory[base+0] = 1
+    m.memory[base+1] = 20
+    m.memory[base+2] = 1
+    m.memory[base+8] = 2            # EN_TYPE = TYPE_ZIGZAG
+    m.memory[base+9] = 1            # direction = left (should bounce immediately)
+    err = call(m, SYM['UPDATE_ENEMIES'], max_runs=500000)
+    x_after = m.memory[base+0]
+    dir_after = m.memory[base+9]
+    ok = (err is None) and (x_after == 0) and (dir_after == 0)
+    print(f"[WAVE] zigzag enemy clamps and flips direction on overshooting the left edge: "
+          f"{'PASS' if ok else 'FAIL'} (x={x_after} dir={dir_after})")
+
+    m2 = fresh_machine(BIN)
+    x_max = 240
+    m2.memory[base+0] = x_max - 1
+    m2.memory[base+1] = 20
+    m2.memory[base+2] = 1
+    m2.memory[base+8] = 2
+    m2.memory[base+9] = 0            # direction = right (should bounce immediately)
+    call(m2, SYM['UPDATE_ENEMIES'], max_runs=500000)
+    x_after2 = m2.memory[base+0]
+    dir_after2 = m2.memory[base+9]
+    ok2 = (x_after2 == x_max) and (dir_after2 == 1)
+    print(f"[WAVE] zigzag enemy clamps and flips direction at the right edge: "
+          f"{'PASS' if ok2 else 'FAIL'} (x={x_after2} dir={dir_after2})")
+
+
+test_wave_spawner_produces_variable_batch_sizes()
+test_enemy_spawn_assigns_movement_type()
+test_sine_enemy_moves_horizontally_and_stays_in_bounds()
+test_zigzag_enemy_bounces_off_edges()

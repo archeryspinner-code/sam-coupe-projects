@@ -97,7 +97,28 @@ EBSIZE  EQU 8
 ; ---- Enemies ----
 MAX_ENEMIES     EQU 6
 ENEMY_SPEED     EQU 1
-ENEMY_SPAWN_INT EQU 60      ; frames between spawns (~1.2s @ 50Hz)
+; Spawning is now wave-based rather than a flat one-per-tick timer (see
+; UPDATE_ENEMY_SPAWNER in starwake_enemies.asm): each tick spawns
+; WAVE_SIZE_MIN..WAVE_SIZE_MAX enemies at once, and the next tick's delay
+; is itself randomised (ENEMY_SPAWN_MIN + 0..ENEMY_SPAWN_RANGE-1) rather
+; than fixed - both the old flat 60-frame single-spawn cadence and truly
+; unpredictable timing were considered; jittered-but-bounded timing was
+; chosen so waves still arrive at a roughly playable pace but never feel
+; metronomic. Averages out close to the old ENEMY_SPAWN_INT=60 cadence.
+ENEMY_SPAWN_MIN   EQU 40
+ENEMY_SPAWN_RANGE EQU 40
+WAVE_SIZE_MIN EQU 1
+WAVE_SIZE_MAX EQU 3
+
+; Movement pattern, picked randomly per-enemy at spawn (see SPAWN_ENEMY) -
+; this is what gives on-screen variety beyond just "how many enemies":
+; a wave can now mix a straight-down enemy with a weaving one.
+TYPE_STRAIGHT EQU 0     ; straight down, X fixed (the original behaviour)
+TYPE_SINE     EQU 1     ; smooth side-to-side weave while descending
+TYPE_ZIGZAG   EQU 2     ; sharper diagonal bounce off the screen edges
+ZIGZAG_SPEED  EQU 2     ; px/frame horizontal speed while zigzagging
+EN_X_MAX EQU SCR_W_PX-SPR_W_PX          ; horizontal clamp for weaving enemies
+
 EN_X     EQU 0
 EN_Y     EQU 1
 EN_STATE EQU 2
@@ -106,7 +127,9 @@ EN_PA_X  EQU 4
 EN_PA_Y  EQU 5
 EN_PB_X  EQU 6
 EN_PB_Y  EQU 7
-ENSIZE   EQU 8
+EN_TYPE  EQU 8               ; TYPE_STRAIGHT/TYPE_SINE/TYPE_ZIGZAG
+EN_PHASE EQU 9               ; meaning depends on EN_TYPE - see UPDATE_ENEMIES
+ENSIZE   EQU 10
 
 STATE_DEAD  EQU 0
 STATE_ALIVE EQU 1

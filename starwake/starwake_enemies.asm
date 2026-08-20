@@ -6,8 +6,17 @@
 ; ==========================================================
 
 ENEMY_POOL: DEFS MAX_ENEMIES*ENSIZE
-ENEMY_SPAWN_TIMER: DEFB ENEMY_SPAWN_INT
+ENEMY_SPAWN_TIMER: DEFB ENEMY_SPAWN_MIN
 SCORE: DEFW 0
+
+; SINE_TABLE - one full weave cycle, amplitude ~10px, 16 steps. Movement
+; uses this as DELTAS (next value minus current), not as an absolute X
+; offset from some stored base position - that avoids needing an extra
+; "base X" field per enemy (which would've meant growing ENSIZE again):
+; adding consecutive differences to a starting X reproduces the same
+; curve as adding absolute offsets to a fixed base would, without ever
+; storing the base itself.
+SINE_TABLE: DEFB 0,4,7,9,10,9,7,4,0,-4,-7,-9,-10,-9,-7,-4
 
 ; SPAWN_ENEMY — random X along the top.   CORRUPTS: A,BC,DE,HL,IX
 SPAWN_ENEMY:
@@ -44,20 +53,63 @@ SPE_FOUND:
     ADD  A,EFIRE_INT_MIN
     POP  IX
     LD   (IX+EN_TIMER),A
+
+    ; Movement pattern is randomised per-enemy, not per-wave, so a single
+    ; wave can mix behaviours - RND_RANGE/CALL don't touch IX, so no
+    ; PUSH/POP needed around them here (unlike the fire-timer roll above,
+    ; which uses IX+d addressing before AND after the call and so does
+    ; need the wrap).
+    LD   A,3
+    CALL RND_RANGE                 ; 0=straight 1=sine 2=zigzag
+    LD   (IX+EN_TYPE),A
+    CP   TYPE_SINE
+    JR   NZ,SPE_CKZIGZAG
+    LD   A,16
+    CALL RND_RANGE                 ; random start point in the weave cycle
+    JR   SPE_PHASE_SET
+SPE_CKZIGZAG:
+    CP   TYPE_ZIGZAG
+    JR   NZ,SPE_PHASE_ZERO
+    LD   A,2
+    CALL RND_RANGE                 ; random initial bounce direction
+    JR   SPE_PHASE_SET
+SPE_PHASE_ZERO:
+    XOR  A
+SPE_PHASE_SET:
+    LD   (IX+EN_PHASE),A
     RET
 SPE_X: DEFB 0
 
-; UPDATE_ENEMY_SPAWNER — periodic spawn timer.   CORRUPTS: A,BC,DE,HL,IX
+; UPDATE_ENEMY_SPAWNER — periodic wave trigger. Each tick spawns a
+; randomised BATCH of WAVE_SIZE_MIN..WAVE_SIZE_MAX enemies (each with its
+; own random X and movement type via SPAWN_ENEMY) rather than always
+; exactly one, and rolls a randomised delay before the next tick instead
+; of a flat interval - see the constants block in starwake.asm for why.
+; CORRUPTS: A,BC,DE,HL,IX
 UPDATE_ENEMY_SPAWNER:
     LD   A,(ENEMY_SPAWN_TIMER)
     DEC  A
     LD   (ENEMY_SPAWN_TIMER),A
     JR   NZ,UES_DONE
-    LD   A,ENEMY_SPAWN_INT
-    LD   (ENEMY_SPAWN_TIMER),A
+
+    LD   A,WAVE_SIZE_MAX-WAVE_SIZE_MIN+1
+    CALL RND_RANGE
+    ADD  A,WAVE_SIZE_MIN
+    LD   (UES_COUNT),A
+UES_SPAWN_LOOP:
     CALL SPAWN_ENEMY
+    LD   A,(UES_COUNT)
+    DEC  A
+    LD   (UES_COUNT),A
+    JR   NZ,UES_SPAWN_LOOP
+
+    LD   A,ENEMY_SPAWN_RANGE
+    CALL RND_RANGE
+    ADD  A,ENEMY_SPAWN_MIN
+    LD   (ENEMY_SPAWN_TIMER),A
 UES_DONE:
     RET
+UES_COUNT: DEFB 0
 
 ; KILL_ENEMY — INPUT: IX=record ptr. Erase from both buffers, mark dead.
 ; CORRUPTS: A,BC,DE,HL
@@ -137,6 +189,15 @@ UEF_NEXT:
     JR   NZ,UEF_LOOP
     RET
 
+; UPDATE_ENEMIES — moves each alive enemy down (as before), then applies
+; horizontal movement according to its EN_TYPE (rolled once at spawn -
+; see SPAWN_ENEMY). This is what makes waves look different from each
+; other beyond just count: TYPE_STRAIGHT enemies fall straight as before;
+; TYPE_SINE and TYPE_ZIGZAG weave/bounce sideways while descending.
+; No CALL happens between reading and using IX here (RND_RANGE isn't
+; used in this routine), so no PUSH/POP IX wrap is needed around the
+; movement branch itself - only KILL_ENEMY (below) needs the usual care,
+; same as before.   CORRUPTS: A,BC,DE,HL,IX
 UPDATE_ENEMIES:
     LD   IX,ENEMY_POOL
     LD   D,MAX_ENEMIES
@@ -144,21 +205,124 @@ UEN_LOOP:
     PUSH DE
     LD   A,(IX+EN_STATE)
     OR   A
-    JR   Z,UEN_NEXT
+    JP   Z,UEN_NEXT
     LD   A,(IX+EN_Y)
     ADD  A,ENEMY_SPEED
     CP   SCR_H_PX
     JR   C,UEN_STORE
     CALL KILL_ENEMY
-    JR   UEN_NEXT
+    JP   UEN_NEXT
 UEN_STORE:
     LD   (IX+EN_Y),A
+
+    LD   A,(IX+EN_TYPE)
+    CP   TYPE_SINE
+    JR   Z,UEN_SINE
+    CP   TYPE_ZIGZAG
+    JR   Z,UEN_ZIGZAG
+    JP   UEN_NEXT                 ; TYPE_STRAIGHT - no X movement
+
+UEN_SINE:
+    ; dx = SINE_TABLE[phase+1] - SINE_TABLE[phase]; X += dx; advance phase.
+    ; See SINE_TABLE's comment for why this is a delta, not an absolute
+    ; offset from a stored base position.
+    LD   A,(IX+EN_PHASE)
+    LD   H,0
+    LD   L,A
+    LD   DE,SINE_TABLE
+    ADD  HL,DE
+    LD   B,(HL)                   ; B = SINE_TABLE[old phase]
+    LD   A,(IX+EN_PHASE)
+    INC  A
+    AND  15                       ; wrap 0-15 (table has 16 entries)
+    LD   (IX+EN_PHASE),A
+    LD   H,0
+    LD   L,A
+    LD   DE,SINE_TABLE
+    ADD  HL,DE
+    LD   A,(HL)                   ; A = SINE_TABLE[new phase]
+    SUB  B                        ; A = dx (signed, small magnitude ~<=4)
+    LD   B,A
+    ; Clamp X+dx into [0,EN_X_MAX]. IMPORTANT: this does NOT test the sign
+    ; of the SUM (X+dx) via JP P/M - X itself is an unsigned 0-240 value
+    ; that legitimately has bit7 set once it's >=128 (e.g. X=129 is a
+    ; perfectly ordinary mid-screen position, not "negative"). Testing the
+    ; sum's sign flag would misread any such value as underflow and snap
+    ; it to 0 - confirmed by direct testing: a sine enemy's X collapsed to
+    ; 0 the moment it first exceeded 127, instead of continuing to weave
+    ; around 120-130 as it should. The fix: only ever sign-test the small
+    ; DELTA (B), which is genuinely a signed value in a safe range, then
+    ; clamp the unsigned X using plain CP against known bounds - never
+    ; sign-test X or (X+dx) itself.
+    LD   A,(IX+EN_X)
+    BIT  7,B
+    JR   Z,UEN_SINE_POS            ; dx >= 0
+    PUSH AF                        ; dx < 0 - save old X, get |dx|
+    LD   A,B
+    NEG
+    LD   C,A                       ; C = |dx|
+    POP  AF                        ; A = old X
+    CP   C
+    JR   C,UEN_SINE_CLAMP0         ; old X < |dx| -> would underflow
+    ADD  A,B                       ; safe: old X - |dx|, stays >= 0
+    JR   UEN_XSTORE
+UEN_SINE_CLAMP0:
+    XOR  A
+    JR   UEN_XSTORE
+UEN_SINE_POS:
+    ADD  A,B                       ; old X + dx, dx small so no wrap risk
+    CP   EN_X_MAX+1
+    JR   C,UEN_XSTORE
+    LD   A,EN_X_MAX
+    JR   UEN_XSTORE
+
+UEN_ZIGZAG:
+    ; EN_PHASE bit0 = current direction (0=right, 1=left). Bounce off
+    ; both screen edges by flipping it and re-clamping X into range.
+    ; Same sign-testing rule as the sine branch above: B (the delta) is
+    ; safe to sign-test, X and X+dx are not.
+    LD   A,(IX+EN_PHASE)
+    LD   B,ZIGZAG_SPEED
+    BIT  0,A
+    JR   Z,UEN_ZZ_RIGHT
+    LD   A,B
+    NEG
+    LD   B,A
+UEN_ZZ_RIGHT:
+    LD   A,(IX+EN_X)
+    BIT  7,B
+    JR   Z,UEN_ZZ_POS               ; dx >= 0
+    PUSH AF
+    LD   A,B
+    NEG
+    LD   C,A
+    POP  AF
+    CP   C
+    JR   C,UEN_ZZ_CLAMP0
+    ADD  A,B
+    JR   UEN_XSTORE
+UEN_ZZ_CLAMP0:
+    XOR  A                         ; went negative - clamp to left edge
+    LD   (IX+EN_PHASE),0           ; direction -> 0 (go right next time)
+    JR   UEN_XSTORE
+UEN_ZZ_POS:
+    ADD  A,B
+    CP   EN_X_MAX+1
+    JR   C,UEN_XSTORE
+    LD   A,EN_X_MAX
+    LD   (IX+EN_PHASE),1           ; direction -> 1 (go left next time)
+
+UEN_XSTORE:
+    LD   (IX+EN_X),A
 UEN_NEXT:
     POP  DE
     LD   BC,ENSIZE
     ADD  IX,BC
     DEC  D
-    JR   NZ,UEN_LOOP
+    JP   NZ,UEN_LOOP      ; JR (relative ±127) no longer reaches UEN_LOOP
+                           ; now that the sine/zigzag branches sit between
+                           ; them - JP is a plain 3-byte absolute jump with
+                           ; no such range limit, same effect either way
     RET
 
 ; RENDER_ENEMIES — erase+redraw every ALIVE enemy in the current back
@@ -276,6 +440,15 @@ DENO_NEXT:
 ; (previously ~1.5/2.5px estimated within the old padded box). Sums:
 ; X: 6.5+1=7.5, Y: 6.5+2=8.5 - close enough to the previous 8/9 that the
 ; thresholds themselves don't need to move, only the centring offset does.
+;
+; This SUB+JP P/NEG sign test on (EN_X-PB_X)+offset is safe (unlike the
+; UPDATE_ENEMIES sign-testing pitfall documented above) specifically
+; because both EN_X and PB_X are bounded to [0,240] - the true difference
+; can never reach the +-128 range where the two's-complement fold would
+; misfire, so treating this difference as signed is fine here. That
+; safety argument does NOT extend to sign-testing an absolute coordinate
+; like X itself (see UEN_SINE/UEN_ZIGZAG above) - the two situations look
+; similar but aren't.
 HIT_TX EQU 8
 HIT_TY EQU 9
 CPE_XOFF EQU SPR_W_PX/2 - BUL_SPR_W_PX/2   ; enemy centre-X minus bullet centre-X offset = 8-1 = 7

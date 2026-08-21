@@ -146,6 +146,7 @@ INP_FIRE  EQU &10
     INCLUDE "starwake_engine.asm"
     INCLUDE "starwake_sprites.asm"
     INCLUDE "starwake_stars.asm"
+    INCLUDE "starwake_bgcycle.asm"
     INCLUDE "starwake_rng.asm"
     INCLUDE "starwake_input.asm"
     INCLUDE "starwake_player.asm"

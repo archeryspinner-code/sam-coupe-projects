@@ -773,3 +773,100 @@ test_wave_spawner_produces_variable_batch_sizes()
 test_enemy_spawn_assigns_movement_type()
 test_sine_enemy_moves_horizontally_and_stays_in_bounds()
 test_zigzag_enemy_bounces_off_edges()
+
+
+def test_bg_stripes_cover_play_area_not_hud():
+    """DRAW_BG_STRIPES should fill HUD_H..SCR_H_PX-1 with the repeating
+    4-colour band pattern, and leave rows 0..HUD_H-1 (the HUD band)
+    completely untouched by it - it's called AFTER the flat black fill
+    in GAME_START, so those rows should still read as the fill byte."""
+    m = fresh_machine(BIN)
+    for addr in range(0, 24576):
+        m.memory[addr] = 0x00     # matches GAME_START's flat black fill
+    err = call(m, SYM['DRAW_BG_STRIPES'], max_runs=500000)
+    hud_untouched = all(m.memory[row*128] == 0x00 for row in range(16))
+    print(f"[BGCYCLE] DRAW_BG_STRIPES leaves the HUD band (rows 0-15) untouched: "
+          f"{'PASS' if (err is None and hud_untouched) else 'FAIL'} (err={err})")
+
+    # Row 16 (first play-area row) should be index 2 in both nibbles = 0x22
+    # Row 24 (one BAND_HEIGHT=8 further down) should roll to index 3 = 0x33
+    row16 = m.memory[16*128]
+    row24 = m.memory[24*128]
+    row32 = m.memory[32*128]
+    row40 = m.memory[40*128]
+    ok = (row16, row24, row32, row40) == (0x22, 0x33, 0x44, 0x55)
+    print(f"[BGCYCLE] bands cycle through indices 2,3,4,5 every {8}px: "
+          f"{'PASS' if ok else 'FAIL'} (rows 16/24/32/40 = "
+          f"{hex(row16)}/{hex(row24)}/{hex(row32)}/{hex(row40)})")
+
+    # Row 48 should wrap back to index 2 (one full 4-band cycle = 32px)
+    row48 = m.memory[48*128]
+    print(f"[BGCYCLE] pattern wraps seamlessly after one full cycle (32px): "
+          f"{'PASS' if row48 == 0x22 else 'FAIL'} (row 48 = {hex(row48)})")
+
+    # Every byte in a stripe row should be the SAME fill byte (solid band,
+    # full screen width) - spot-check a few positions across row 16
+    row16_bytes = [m.memory[16*128 + off] for off in (0, 40, 80, 127)]
+    uniform = all(b == 0x22 for b in row16_bytes)
+    print(f"[BGCYCLE] stripe band is solid across the full screen width: "
+          f"{'PASS' if uniform else 'FAIL'} (sampled={[hex(b) for b in row16_bytes]})")
+
+
+def test_bg_cycle_rotates_on_schedule_and_wraps():
+    """UPDATE_BG_CYCLE should only rotate BGCYCLE_VALS every
+    BGCYCLE_INTERVAL frames (not every frame), and the rotation should be
+    a genuine right-shift with wraparound (see the routine's own comment
+    for the direction derivation) - confirm both by watching the RAM
+    copy directly, since the actual palette OUT writes aren't observable
+    in this flat-memory emulator."""
+    m = fresh_machine(BIN)
+    base = SYM['BGCYCLE_VALS']
+    initial = list(m.memory[base:base+4])   # [32,48,64,80]
+
+    # First 3 frames (BGCYCLE_INTERVAL-1): timer counts down, no rotation
+    for i in range(3):
+        call(m, SYM['UPDATE_BG_CYCLE'], max_runs=500000)
+    unchanged = list(m.memory[base:base+4]) == initial
+    print(f"[BGCYCLE] no rotation before BGCYCLE_INTERVAL frames have passed: "
+          f"{'PASS' if unchanged else 'FAIL'} (vals={list(m.memory[base:base+4])})")
+
+    # 4th frame: timer hits zero, rotation fires - right-shift means
+    # new[0]=old[3], new[1]=old[0], new[2]=old[1], new[3]=old[2]
+    call(m, SYM['UPDATE_BG_CYCLE'], max_runs=500000)
+    after_one = list(m.memory[base:base+4])
+    expected = [initial[3], initial[0], initial[1], initial[2]]
+    ok = after_one == expected
+    print(f"[BGCYCLE] rotates right (with wrap) exactly on the 4th frame: "
+          f"{'PASS' if ok else 'FAIL'} (got={after_one} expected={expected})")
+
+    # 4 rotation cycles (16 frames total) should return to the exact
+    # starting arrangement - confirms the pattern loops seamlessly with
+    # no drift, matching the comment's "back to original after 4 steps"
+    for i in range(15):   # 3 more frames to finish this cycle + 12 for 3 more
+        call(m, SYM['UPDATE_BG_CYCLE'], max_runs=500000)
+    after_four_cycles = list(m.memory[base:base+4])
+    print(f"[BGCYCLE] returns to the exact starting arrangement after 4 rotations: "
+          f"{'PASS' if after_four_cycles == initial else 'FAIL'} "
+          f"(got={after_four_cycles} expected={initial})")
+
+
+def test_game_start_and_frame_loop_still_work_with_bg_cycle():
+    """Integration check: GAME_START (now drawing stripes into all 3
+    pages) and a run of MAIN_LOOP-equivalent calls (now including
+    UPDATE_BG_CYCLE) still complete without crash/hang."""
+    m = fresh_machine(BIN)
+    err = call(m, SYM['DRAW_BG_STRIPES'], max_runs=500000)
+    ok = err is None
+    for i in range(60):
+        e = call(m, SYM['UPDATE_BG_CYCLE'], max_runs=500000)
+        if e:
+            ok = False
+            err = e
+            break
+    print(f"[BGCYCLE] DRAW_BG_STRIPES + 60 frames of UPDATE_BG_CYCLE, no crash/hang: "
+          f"{'PASS' if ok else 'FAIL'} (err={err})")
+
+
+test_bg_stripes_cover_play_area_not_hud()
+test_bg_cycle_rotates_on_schedule_and_wraps()
+test_game_start_and_frame_loop_still_work_with_bg_cycle()

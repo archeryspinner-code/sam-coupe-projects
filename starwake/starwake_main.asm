@@ -3,25 +3,31 @@
 ; ==========================================================
 
 GAME_START:
-    ; Fill all three pages with a plain dark background (starfield
-    ; comes in Phase 2). CORRUPTS: A,BC,DE,HL
+    ; Fill all three pages with a plain dark background, then stripe the
+    ; play area (HUD_H..SCR_H_PX-1) with the palette-cycling background -
+    ; DRAW_BG_STRIPES must run once per page while THAT page is still
+    ; mapped, same as the black fill, so it's called right after each
+    ; FILL_SCREEN rather than in a separate pass. CORRUPTS: A,BC,DE,HL
     LD   A,(PG_BG)
     OR   RAM_BIT
     OUT  (PORT_LMPR),A
     LD   A,&00
     CALL FILL_SCREEN
+    CALL DRAW_BG_STRIPES
 
     LD   A,(PG_BUF_A)
     OR   RAM_BIT
     OUT  (PORT_LMPR),A
     LD   A,&00
     CALL FILL_SCREEN
+    CALL DRAW_BG_STRIPES
 
     LD   A,(PG_BUF_B)
     OR   RAM_BIT
     OUT  (PORT_LMPR),A
     LD   A,&00
     CALL FILL_SCREEN
+    CALL DRAW_BG_STRIPES
 
     CALL MAP_BACK
     CALL INIT_STARS
@@ -42,6 +48,9 @@ MAIN_LOOP:
     CALL COLLIDE_PBULLETS_VS_ENEMIES
     CALL COLLIDE_EBULLETS_VS_PLAYER
     CALL UPDATE_STARS
+    CALL UPDATE_BG_CYCLE          ; palette-only - no video memory touched,
+                                   ; so it doesn't need to slot into the
+                                   ; erase/draw ordering below at all
 
     ; Erase every entity's OLD position first, before ANY entity is
     ; redrawn. Interleaving erase-then-draw per entity (the previous

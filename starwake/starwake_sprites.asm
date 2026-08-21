@@ -143,10 +143,26 @@ GSP_OK:
 ; CORRUPTS: A,BC,DE,HL,IX
 ; NOTE: uses IX as scratch internally. Any caller that walks an entity
 ; pool with IX as the record pointer (see entities.md's pool-iteration
-; pattern) MUST wrap this call in PUSH IX / POP IX, exactly the same
-; reasoning as protecting a live loop counter across ERASE_SPR's DE usage
-; - this is a real, live hazard in this project specifically because
-; RENDER_PBULLETS and RENDER_ENEMIES both use IX as their pool pointer.
+; pattern) MUST wrap this call in PUSH IX / POP IX - see the callers in
+; starwake_player.asm/starwake_enemies.asm for the existing wraps.
+;
+; PERFORMANCE: the inner AND/OR passes are unrolled (SPR_W=8, a compile-
+; time constant, so this is safe to hardcode) rather than looping with
+; DJNZ. The destination (screen memory, read+written every byte) is
+; addressed via IX+0..IX+7 with NO increment between bytes at all, since
+; the row is now straight-line code and every offset is known up front -
+; that's where the real saving is, not just removing DJNZ's 13T/iteration.
+; The mask/pixel SOURCE pointer stays in HL, incremented per byte as
+; before: (IX+d) costs 19T per access regardless of whether IX itself
+; gets incremented, so putting the source there too and dropping HL
+; entirely would have made things worse, not better - HL's plain (HL)
+; addressing is 7T, cheapest available, and is exactly the operand that
+; still needs a genuine per-byte advance (each row uses a different mask/
+; pixel byte), so it's the right one to keep as an increment-based
+; pointer. Confirmed against skill's optimisation.md instruction-cost
+; table: LD/AND/LD via (IX+d) is 19T vs 7T via (HL) - eliminating 8 INC
+; IX instructions (10T each) per phase while keeping HL's cheap 7T access
+; is worth substantially more than trying to remove HL's increments too.
 DRAW_SPR_MASKED:
     LD   A,C
     CP   HUD_H
@@ -166,32 +182,82 @@ DSM_ROW:
     PUSH BC
     LD   IX,(DSM_SPTR)
     LD   HL,(DSM_MPTR)
-    LD   B,SPR_W
-DSM_AND:
     LD   A,(IX+0)
     AND  (HL)
     LD   (IX+0),A
-    INC  IX
     INC  HL
-    DJNZ DSM_AND
+    LD   A,(IX+1)
+    AND  (HL)
+    LD   (IX+1),A
+    INC  HL
+    LD   A,(IX+2)
+    AND  (HL)
+    LD   (IX+2),A
+    INC  HL
+    LD   A,(IX+3)
+    AND  (HL)
+    LD   (IX+3),A
+    INC  HL
+    LD   A,(IX+4)
+    AND  (HL)
+    LD   (IX+4),A
+    INC  HL
+    LD   A,(IX+5)
+    AND  (HL)
+    LD   (IX+5),A
+    INC  HL
+    LD   A,(IX+6)
+    AND  (HL)
+    LD   (IX+6),A
+    INC  HL
+    LD   A,(IX+7)
+    AND  (HL)
+    LD   (IX+7),A
+    INC  HL
     LD   (DSM_MPTR),HL
     LD   IX,(DSM_SPTR)
     LD   HL,(DSM_PPTR)
-    LD   B,SPR_W
-DSM_OR:
     LD   A,(IX+0)
     OR   (HL)
     LD   (IX+0),A
-    INC  IX
     INC  HL
-    DJNZ DSM_OR
+    LD   A,(IX+1)
+    OR   (HL)
+    LD   (IX+1),A
+    INC  HL
+    LD   A,(IX+2)
+    OR   (HL)
+    LD   (IX+2),A
+    INC  HL
+    LD   A,(IX+3)
+    OR   (HL)
+    LD   (IX+3),A
+    INC  HL
+    LD   A,(IX+4)
+    OR   (HL)
+    LD   (IX+4),A
+    INC  HL
+    LD   A,(IX+5)
+    OR   (HL)
+    LD   (IX+5),A
+    INC  HL
+    LD   A,(IX+6)
+    OR   (HL)
+    LD   (IX+6),A
+    INC  HL
+    LD   A,(IX+7)
+    OR   (HL)
+    LD   (IX+7),A
+    INC  HL
     LD   (DSM_PPTR),HL
     LD   HL,(DSM_SPTR)
     LD   BC,SCR_BYTES_W
     ADD  HL,BC
     LD   (DSM_SPTR),HL
     POP  BC
-    DJNZ DSM_ROW
+    DEC  B                 ; DJNZ's range (±127) no longer reaches DSM_ROW
+    JP   NZ,DSM_ROW        ; now that the row body is fully unrolled - JP
+                            ; is a plain absolute jump, same effect either way
     RET
 DSM_PPTR: DEFW 0
 DSM_MPTR: DEFW 0
